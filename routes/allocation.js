@@ -6,7 +6,7 @@ const { getAllocation, saveAllocation, updateBand } = require('../controllers/al
 const router = express.Router();
 
 router.get('/',       requireAuth, getAllocation);
-router.put('/',       requirePremium, saveAllocation);
-router.patch('/band', requirePremium, updateBand);
+router.put('/',       requireAuth, requirePremium, saveAllocation);
+router.patch('/band', requireAuth, requirePremium, updateBand);
 
 module.exports = router;
