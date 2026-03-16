@@ -2,7 +2,7 @@ const supabaseAdmin = require('./supabaseAdmin');
 
 /**
  * Verifies the Supabase JWT from the Authorization header.
- * Attaches req.user = { id, email, ... } on success.
+ * Attaches req.user = { id, email, isPremium, ... } on success.
  */
 async function requireAuth(req, res, next) {
   const header = req.headers.authorization;
@@ -20,6 +20,19 @@ async function requireAuth(req, res, next) {
   }
 
   req.user = data.user;
+
+  try {
+    const { data: sub } = await supabaseAdmin
+      .from('subscriptions')
+      .select('is_premium')
+      .eq('user_id', data.user.id)
+      .maybeSingle();
+
+    req.user.isPremium = sub?.is_premium ?? false;
+  } catch {
+    req.user.isPremium = false;
+  }
+
   next();
 }
 

@@ -1,16 +1,13 @@
-const supabaseAdmin      = require('../utils/supabaseAdmin');
-const { getPrices }      = require('../utils/priceService');
+const supabaseAdmin = require('../utils/supabaseAdmin');
+const { getPrices } = require('../utils/priceService');
 const { computeSignals } = require('../utils/rebalanceEngine');
 
-/**
- * GET /dashboard?portfolio_id=<uuid>
- * Portfolio summary with live P&L and rebalancing signals.
- * Holdings are derived from trades via RPC.
- */
 async function getSummary(req, res, next) {
   try {
-    const userId      = req.user.id;
+    const userId = req.user.id;
     const portfolioId = req.query.portfolio_id;
+
+    console.log(`[Dashboard] Iniciando para usuário ${userId}, portfolioId: ${portfolioId || 'último'}`);
 
     let portfolioQuery = supabaseAdmin
       .from('portfolios')
@@ -29,72 +26,151 @@ async function getSummary(req, res, next) {
     const { data: portfolio, error: pErr } = await portfolioQuery.maybeSingle();
 
     if (pErr) throw pErr;
-    if (!portfolio) return res.json({ portfolio: null, signals: [], totalValueUsd: 0, totalPnl: 0 });
+    if (!portfolio) {
+      console.log('[Dashboard] Nenhum portfolio encontrado');
+      return res.json({
+        portfolio: null,
+        signals: [],
+        totalValueUsd: 0,
+        totalPnl: 0,
+        totalRealized: 0,
+        totalUnrealized: 0,
+        sellCount: 0,
+        buyCount: 0,
+        assetCount: 0,
+      });
+    }
 
-    const [{ data: paRows, error: paErr }, { data: holdings, error: hErr }] = await Promise.all([
+    console.log(`[Dashboard] Portfolio encontrado: ${portfolio.id} - ${portfolio.name}`);
+
+    const [
+      { data: paRows, error: paErr },
+      { data: holdings, error: hErr }
+    ] = await Promise.all([
       supabaseAdmin
         .from('portfolio_assets')
-        .select('ticker, target_pct, tolerance_band_override, coingecko_id')
+        .select('ticker, target_pct, tolerance_band_override, coingecko_id, logo')
         .eq('portfolio_id', portfolio.id),
       supabaseAdmin
         .rpc('get_portfolio_holdings', { p_portfolio_id: portfolio.id }),
     ]);
 
     if (paErr) throw paErr;
-    if (hErr)  throw hErr;
+    if (hErr) throw hErr;
 
     const targets = paRows ?? [];
+    const holdingsArray = holdings ?? [];
 
-    const allTickers = [...new Set([
-      ...(holdings ?? []).map((h) => h.ticker),
-      ...targets.map((t) => t.ticker),
-    ])];
+    console.log(`[Dashboard] Targets encontrados: ${targets.length}, Holdings encontrados: ${holdingsArray.length}`);
+
+    const allTickers = [
+      ...new Set([
+        ...holdingsArray.map((h) => h.ticker),
+        ...targets.map((t) => t.ticker),
+      ]),
+    ];
+
+    console.log('[Dashboard] Todos os tickers:', allTickers);
 
     if (!allTickers.length) {
-      return res.json({ portfolio, signals: [], totalValueUsd: 0, totalPnl: 0 });
+      console.log('[Dashboard] Nenhum ticker para processar');
+      return res.json({
+        portfolio,
+        signals: [],
+        totalValueUsd: 0,
+        totalPnl: 0,
+        totalRealized: 0,
+        totalUnrealized: 0,
+        sellCount: 0,
+        buyCount: 0,
+        assetCount: 0,
+      });
     }
 
-    // Build tickerToId from portfolio_assets first
-    const tickerToId = Object.fromEntries(
-      targets
-        .filter((r) => r.coingecko_id)
-        .map((r) => [r.ticker.toUpperCase(), r.coingecko_id])
+    // Mapa de metadados vindo de portfolio_assets
+    const assetMetadata = {};
+    targets.forEach((t) => {
+      const ticker = t.ticker.toUpperCase();
+      assetMetadata[ticker] = {
+        coingecko_id: t.coingecko_id,
+        logo: t.logo,
+      };
+      console.log(`[Metadata] De portfolio_assets: ${ticker} -> coingecko_id: ${t.coingecko_id}, logo: ${t.logo}`);
+    });
+
+    // Tickers sem metadata em portfolio_assets
+    const missingTickers = allTickers.filter(
+      (t) => !assetMetadata[t.toUpperCase()]?.coingecko_id
     );
 
-    // For tickers not covered by portfolio_assets (free users),
-    // fall back to coingecko_id stored in trades
-    const missingTickers = allTickers.filter((t) => !tickerToId[t.toUpperCase()]);
-
     if (missingTickers.length > 0) {
+      console.log('[Dashboard] Tickers sem metadata em portfolio_assets, buscando em trades:', missingTickers);
+
+      // Primeiro, vamos ver todos os trades desses tickers (sem filtro de null)
+      const { data: allTradesForTickers } = await supabaseAdmin
+        .from('trades')
+        .select('ticker, coingecko_id, logo')
+        .eq('portfolio_id', portfolio.id)
+        .in('ticker', missingTickers);
+
+      console.log('[Dashboard] Todos os trades encontrados para esses tickers (incluindo nulls):', allTradesForTickers);
+
+      // Agora a query com filtro not null (a original)
       const { data: tradeRows } = await supabaseAdmin
         .from('trades')
-        .select('ticker, coingecko_id')
+        .select('ticker, coingecko_id, logo')
         .eq('portfolio_id', portfolio.id)
         .in('ticker', missingTickers)
         .not('coingecko_id', 'is', null);
 
+      console.log('[Dashboard] Trades com coingecko_id não nulo:', tradeRows);
+
       for (const row of tradeRows ?? []) {
-        const key = row.ticker.toUpperCase();
-        if (!tickerToId[key]) tickerToId[key] = row.coingecko_id;
+        const ticker = row.ticker.toUpperCase();
+        if (!assetMetadata[ticker]) {
+          assetMetadata[ticker] = {};
+        }
+        if (!assetMetadata[ticker].coingecko_id) {
+          assetMetadata[ticker].coingecko_id = row.coingecko_id;
+        }
+        if (!assetMetadata[ticker].logo) {
+          assetMetadata[ticker].logo = row.logo;
+        }
+        console.log(`[Metadata] De trades: ${ticker} -> coingecko_id: ${row.coingecko_id}, logo: ${row.logo}`);
       }
     }
 
-    const prices     = await getPrices(allTickers, tickerToId);
-    const holdingMap = Object.fromEntries((holdings ?? []).map((h) => [h.ticker, h]));
+    // Após tentar preencher, vamos ver o estado final do metadata
+    console.log('[Dashboard] assetMetadata final:', assetMetadata);
+
+    const tickerToId = Object.fromEntries(
+      allTickers
+        .map((t) => [t.toUpperCase(), assetMetadata[t.toUpperCase()]?.coingecko_id])
+        .filter(([_, id]) => id)
+    );
+
+    console.log('[Dashboard] tickerToId para preços:', tickerToId);
+
+    const prices = await getPrices(allTickers, tickerToId);
+    console.log('[Dashboard] Preços recebidos:', prices);
+
+    const holdingMap = Object.fromEntries(
+      holdingsArray.map((h) => [h.ticker, h])
+    );
 
     const assetInputs = allTickers.map((ticker) => {
       const h = holdingMap[ticker];
       const t = targets.find((tg) => tg.ticker === ticker);
       return {
         ticker,
-        targetPct:     t ? Number(t.target_pct) / 100 : 0,
+        targetPct: t ? Number(t.target_pct) / 100 : 0,
         toleranceBand: t?.tolerance_band_override != null
           ? Number(t.tolerance_band_override)
           : Number(portfolio.tolerance_band),
-        quantity:      h ? Number(h.net_quantity) : 0,
-        priceUsd:      prices[ticker]?.usd ?? 0,
-        avgCost:       h ? Number(h.avg_cost)     : 0,
-        realizedPnl:   h ? Number(h.realized_pnl) : 0,
+        quantity: h ? Number(h.net_quantity) : 0,
+        priceUsd: prices[ticker]?.usd ?? 0,
+        avgCost: h ? Number(h.avg_cost) : 0,
+        realizedPnl: h ? Number(h.realized_pnl) : 0,
       };
     });
 
@@ -102,10 +178,11 @@ async function getSummary(req, res, next) {
 
     const enrichedSignals = signals.map((s) => {
       const input = assetInputs.find((a) => a.ticker === s.ticker);
+      const meta = assetMetadata[s.ticker] || {};
 
-      const quantity    = input?.quantity    ?? 0;
-      const priceUsd    = s.priceUsd         ?? 0;
-      const avgCost     = input?.avgCost     ?? 0;
+      const quantity = input?.quantity ?? 0;
+      const priceUsd = s.priceUsd ?? 0;
+      const avgCost = input?.avgCost ?? 0;
       const realizedPnl = input?.realizedPnl ?? 0;
 
       const unrealizedPnl = (priceUsd - avgCost) * quantity;
@@ -119,15 +196,23 @@ async function getSummary(req, res, next) {
         realizedPnl,
         unrealizedPnl,
         totalPnl: realizedPnl + unrealizedPnl,
+        coingecko_id: meta.coingecko_id,
+        logo: meta.logo,
       };
     });
 
-    const totalValueUsd   = enrichedSignals.reduce((sum, s) => sum + s.totalValueUsd, 0);
-    const sellCount       = enrichedSignals.filter((s) => s.signal === 'SELL').length;
-    const buyCount        = enrichedSignals.filter((s) => s.signal === 'BUY').length;
-    const totalPnl        = enrichedSignals.reduce((sum, s) => sum + s.totalPnl,       0);
-    const totalRealized   = enrichedSignals.reduce((sum, s) => sum + s.realizedPnl,    0);
-    const totalUnrealized = enrichedSignals.reduce((sum, s) => sum + s.unrealizedPnl,  0);
+    console.log('[Dashboard] Primeiro sinal enriquecido:', enrichedSignals.length ? {
+      ticker: enrichedSignals[0].ticker,
+      logo: enrichedSignals[0].logo,
+      coingecko_id: enrichedSignals[0].coingecko_id
+    } : 'nenhum');
+
+    const totalValueUsd = enrichedSignals.reduce((sum, s) => sum + s.totalValueUsd, 0);
+    const sellCount = enrichedSignals.filter((s) => s.signal === 'SELL').length;
+    const buyCount = enrichedSignals.filter((s) => s.signal === 'BUY').length;
+    const totalPnl = enrichedSignals.reduce((sum, s) => sum + s.totalPnl, 0);
+    const totalRealized = enrichedSignals.reduce((sum, s) => sum + s.realizedPnl, 0);
+    const totalUnrealized = enrichedSignals.reduce((sum, s) => sum + s.unrealizedPnl, 0);
 
     return res.json({
       portfolio,
@@ -141,6 +226,7 @@ async function getSummary(req, res, next) {
       totalUnrealized,
     });
   } catch (err) {
+    console.error('[Dashboard] Erro:', err);
     next(err);
   }
 }
