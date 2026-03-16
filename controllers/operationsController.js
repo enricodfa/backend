@@ -1,5 +1,4 @@
 const supabaseAdmin = require('../utils/supabaseAdmin');
-const { getPrice }  = require('../utils/priceService');
 
 /**
  * GET /operations
@@ -35,22 +34,23 @@ async function listOperations(req, res, next) {
 /**
  * POST /operations
  * Creates a new trade record.
- * Body: { portfolioId, ticker, type, quantity, price_usd?, traded_at?, notes? }
- * If price_usd is omitted, fetches live price from CoinGecko.
+ * Body: { portfolioId, ticker, coingecko_id, logo, type, quantity, price_usd, traded_at?, notes? }
  */
 async function createOperation(req, res, next) {
   try {
     const userId = req.user.id;
-    const { portfolioId, ticker, type, quantity, price_usd, traded_at, notes } = req.body;
+    const {
+      portfolioId, ticker, coingecko_id, logo,
+      type, quantity, price_usd, traded_at, notes,
+    } = req.body;
 
-    if (!portfolioId || !ticker || !type || !quantity) {
-      return res.status(400).json({ error: 'portfolioId, ticker, type, and quantity are required' });
+    if (!portfolioId || !ticker || !type || !quantity || price_usd == null) {
+      return res.status(400).json({ error: 'portfolioId, ticker, type, quantity, and price_usd are required' });
     }
     if (!['BUY', 'SELL'].includes(type.toUpperCase())) {
       return res.status(400).json({ error: 'type must be BUY or SELL' });
     }
 
-    // Validate portfolio ownership
     const { data: portfolio, error: pErr } = await supabaseAdmin
       .from('portfolios')
       .select('id')
@@ -60,23 +60,17 @@ async function createOperation(req, res, next) {
 
     if (pErr || !portfolio) return res.status(404).json({ error: 'Portfolio not found' });
 
-    // Resolve price
-    let priceUsd = price_usd != null ? Number(price_usd) : null;
-    if (!priceUsd) {
-      priceUsd = await getPrice(ticker);
-    }
-
-    const qty = Number(quantity);
-
     const { data, error } = await supabaseAdmin
       .from('trades')
       .insert({
         user_id:      userId,
         portfolio_id: portfolioId,
         ticker:       ticker.toUpperCase(),
+        coingecko_id: coingecko_id ?? null,
+        logo:         logo ?? null,
         type:         type.toUpperCase(),
-        quantity:     qty,
-        price_usd:    priceUsd,
+        quantity:     Number(quantity),
+        price_usd:    Number(price_usd),
         traded_at:    traded_at ?? new Date().toISOString(),
         notes:        notes ?? null,
       })
@@ -102,12 +96,10 @@ async function updateOperation(req, res, next) {
     const { quantity, price_usd, traded_at, notes } = req.body;
 
     const updates = {};
-    if (quantity   != null) updates.quantity  = Number(quantity);
-    if (price_usd  != null) updates.price_usd = Number(price_usd);
-    if (traded_at  != null) updates.traded_at = traded_at;
-    if (notes      != null) updates.notes     = notes;
-
-    // total_usd is a generated column — DB computes it automatically
+    if (quantity  != null) updates.quantity  = Number(quantity);
+    if (price_usd != null) updates.price_usd = Number(price_usd);
+    if (traded_at != null) updates.traded_at = traded_at;
+    if (notes     != null) updates.notes     = notes;
 
     const { data, error } = await supabaseAdmin
       .from('trades')

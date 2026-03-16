@@ -7,7 +7,7 @@ const authRoutes       = require('./routes/auth');
 const plansRoutes      = require('./routes/plans');
 const dashboardRoutes  = require('./routes/dashboard');
 const analysisRoutes   = require('./routes/analysis');
-const allocationRoutes = require('./routes/allocation');
+const portfoliosRoutes = require('./routes/portfolios');   
 const operationsRoutes = require('./routes/operations');
 const assetsRoutes     = require('./routes/assets');
 
@@ -22,13 +22,13 @@ app.use(express.json());
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
 /* ── Routes ─────────────────────────────────────────────────── */
-app.use('/auth',       authRoutes);
-app.use('/plans',      plansRoutes);
-app.use('/dashboard',  dashboardRoutes);
-app.use('/analysis',   analysisRoutes);
-app.use('/allocation', allocationRoutes);
-app.use('/operations', operationsRoutes);
-app.use('/assets',     assetsRoutes);
+app.use('/auth',        authRoutes);
+app.use('/plans',       plansRoutes);
+app.use('/dashboard',   dashboardRoutes);
+app.use('/analysis',    analysisRoutes);
+app.use('/portfolios',  portfoliosRoutes);                
+app.use('/operations',  operationsRoutes);
+app.use('/assets',      assetsRoutes);
 
 /* ── 404 ────────────────────────────────────────────────────── */
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
